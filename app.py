@@ -1,75 +1,75 @@
 from flask import Flask, request, jsonify
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import load_model
 import cv2
+import os
 from werkzeug.utils import secure_filename
 from difflib import get_close_matches
+import tensorflow as tf
 
 app = Flask(__name__)
 
-# === Load Model (disable optimizer load to avoid warnings)
-try:
-    model = load_model('handwritten_character_recog_model.h5', compile=False)
-    print("✅ Model loaded successfully.")
-except Exception as e:
-    print(f"❌ Failed to load model: {e}")
-    model = None
+# === Load the compressed TFLite model
+interpreter = tf.lite.Interpreter(model_path="handwritten_model_quantized.tflite")
+interpreter.allocate_tensors()
 
-# === Character Mapping
+# Get input & output details
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# === Character mapping
 words = {
-    0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F', 6: 'G', 7: 'H', 8: 'I', 9: 'J',
-    10: 'K', 11: 'L', 12: 'M', 13: 'N', 14: 'O', 15: 'P', 16: 'Q', 17: 'R',
-    18: 'S', 19: 'T', 20: 'U', 21: 'V', 22: 'W', 23: 'X', 24: 'Y', 25: 'Z'
+    0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F', 6: 'G',
+    7: 'H', 8: 'I', 9: 'J', 10: 'K', 11: 'L', 12: 'M', 13: 'N',
+    14: 'O', 15: 'P', 16: 'Q', 17: 'R', 18: 'S', 19: 'T',
+    20: 'U', 21: 'V', 22: 'W', 23: 'X', 24: 'Y', 25: 'Z'
 }
 
-# === Sample dictionary (for autocorrect)
-dictionary = ["ABHINAV", "ALEX", "JULIA", "ELISE", "DANIEL", "JOHN", "TOM", "KEN", "KAREN", "NORA"]
+# Sample dictionary for autocorrection
+dictionary = ["ABHINAV", "JULIA", "ELISE", "DANIEL", "KAREN", "TOM", "NORA", "ALEX", "JOHN", "EMMA"]
 
-@app.route('/')
-def index():
-    return "📝 Voxscribe API is running. Use POST /predict with an image."
+# === Home route
+@app.route("/")
+def home():
+    return "✅ Voxscribe TFLite API running! POST an image to /predict"
 
-@app.route('/predict', methods=['POST'])
+# === Prediction route
+@app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
-        return jsonify({'error': 'Model not loaded'}), 500
-
     if 'image' not in request.files:
-        return jsonify({'error': 'No image provided'}), 400
+        return jsonify({'error': 'No image file uploaded'}), 400
 
     file = request.files['image']
-    if file.filename == '':
-        return jsonify({'error': 'No filename provided'}), 400
+    filename = secure_filename(file.filename)
+    img_array = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
 
-    try:
-        image_bytes = np.frombuffer(file.read(), np.uint8)
-        img = cv2.imdecode(image_bytes, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return jsonify({'error': 'Invalid image format'}), 400
 
-        if img is None:
-            return jsonify({'error': 'Unable to decode image'}), 400
+    # === Preprocess image
+    img_resized = cv2.resize(img, (28, 28))
+    _, img_thresh = cv2.threshold(img_resized, 100, 255, cv2.THRESH_BINARY_INV)
+    input_image = img_thresh.astype(np.float32) / 255.0
+    input_image = np.expand_dims(input_image, axis=(0, -1))  # (1, 28, 28, 1)
 
-        # Preprocess: resize, threshold, normalize
-        img_resized = cv2.resize(img, (28, 28))
-        _, img_thresh = cv2.threshold(img_resized, 100, 255, cv2.THRESH_BINARY_INV)
-        final_input = np.reshape(img_thresh, (1, 28, 28, 1)) / 255.0
+    # === Set input and run inference
+    interpreter.set_tensor(input_details[0]['index'], input_image)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])
 
-        # Predict
-        preds = model.predict(final_input)
-        predicted_label = words[np.argmax(preds)]
+    predicted_index = np.argmax(output_data)
+    predicted_letter = words[predicted_index]
 
-        # Optional autocorrect (later use full strings)
-        raw_output = predicted_label
-        suggestion = get_close_matches(raw_output, dictionary, n=1)
-        autocorrected = suggestion[0] if suggestion else None
+    # === Autocorrect if needed (you can modify logic later)
+    raw_word = predicted_letter
+    closest = get_close_matches(raw_word, dictionary, n=1)
+    auto = closest[0] if closest else None
 
-        return jsonify({
-            'prediction': raw_output,
-            'autocorrected': autocorrected
-        })
+    return jsonify({
+        "prediction": predicted_letter,
+        "autocorrected": auto
+    })
 
-    except Exception as e:
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
-
-if __name__ == '__main__':
+# === Run app (for local testing only — Render uses gunicorn)
+if __name__ == "__main__":
     app.run(debug=True)
