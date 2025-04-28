@@ -1,5 +1,5 @@
 flask
 tensorflow
-numpy
-opencv-python-headless
-gunicorn
+textblob
+nltk
+opencv-python

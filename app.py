@@ -1,75 +1,158 @@
-from flask import Flask, request, jsonify
-import numpy as np
 import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
+from flask import Flask, request, jsonify
+from textblob import TextBlob
 import os
-from werkzeug.utils import secure_filename
-from difflib import get_close_matches
-import tensorflow as tf
 
+# ----------------------------
+# Preprocessing (your good version)
+# ----------------------------
+def preprocess_for_model(cropped_img):
+    target_dim = 28
+    edge_size = 2
+    resize_dim = target_dim - edge_size * 2
+
+    h, w = cropped_img.shape
+    pad_vertically = w > h
+    pad_size = (max(h, w) - min(h, w)) // 2
+
+    if pad_vertically:
+        pad = ((pad_size, pad_size), (0, 0))
+    else:
+        pad = ((0, 0), (pad_size, pad_size))
+
+    padded = np.pad(cropped_img, pad, mode='constant', constant_values=255)
+    resized = cv2.resize(padded, (resize_dim, resize_dim))
+    final = np.pad(resized, ((edge_size, edge_size), (edge_size, edge_size)), mode='constant', constant_values=255)
+
+    final = 1.0 - (final.astype('float32') / 255.0)
+    final = np.expand_dims(final, axis=(0, -1))  # (1,28,28,1)
+
+    return final
+
+# ----------------------------
+# Segment letters
+# ----------------------------
+def segment_letters(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w * h > 100:  # Filter small noise
+            boxes.append((x, y, w, h))
+    return boxes
+
+def sort_boxes(boxes):
+    if len(boxes) == 0:
+        return []
+
+    boxes = sorted(boxes, key=lambda b: b[1])
+
+    lines = []
+    current_line = [boxes[0]]
+
+    for box in boxes[1:]:
+        if abs(box[1] - current_line[-1][1]) < 20:
+            current_line.append(box)
+        else:
+            lines.append(current_line)
+            current_line = [box]
+    lines.append(current_line)
+
+    for line in lines:
+        line.sort(key=lambda b: b[0])
+
+    sorted_boxes = [box for line in lines for box in line]
+    return sorted_boxes
+
+# ----------------------------
+# Predict and AutoCorrect
+# ----------------------------
+def predict_image(image, model):
+    characters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+    img = cv2.imdecode(np.frombuffer(image.read(), np.uint8), cv2.IMREAD_COLOR)
+    original = img.copy()
+
+    boxes = segment_letters(img)
+    boxes = sort_boxes(boxes)
+
+    predicted_text = ""
+    prev_box = None
+    current_line_y = None
+
+    for i, (x, y, w, h) in enumerate(boxes):
+        cropped = img[y:y+h, x:x+w]
+        cropped_gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+
+        input_tensor = preprocess_for_model(cropped_gray)
+        prediction = model.predict(input_tensor, verbose=0)
+        idx = np.argmax(prediction)
+        char = characters[idx]
+
+        if prev_box is not None:
+            gap = x - (prev_box[0] + prev_box[2])
+
+            if gap > w * 1.5:
+                predicted_text += " "
+
+            if abs(y - current_line_y) > 30:
+                predicted_text += "\n"
+
+        predicted_text += char
+        prev_box = (x, y, w, h)
+        current_line_y = y
+
+    return predicted_text
+
+def autocorrect_text(text):
+    corrected_lines = []
+    for line in text.split("\n"):
+        blob = TextBlob(line)
+        corrected = str(blob.correct())
+        corrected_lines.append(corrected)
+    return "\n".join(corrected_lines)
+
+# ----------------------------
+# Flask App
+# ----------------------------
 app = Flask(__name__)
 
-# === Load the compressed TFLite model
-interpreter = tf.lite.Interpreter(model_path="handwritten_model_quantized.tflite")
-interpreter.allocate_tensors()
+model = load_model("emnistCNN.h5", compile=False)
+print("✅ Model loaded successfully.")
 
-# Get input & output details
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-# === Character mapping
-words = {
-    0: 'A', 1: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F', 6: 'G',
-    7: 'H', 8: 'I', 9: 'J', 10: 'K', 11: 'L', 12: 'M', 13: 'N',
-    14: 'O', 15: 'P', 16: 'Q', 17: 'R', 18: 'S', 19: 'T',
-    20: 'U', 21: 'V', 22: 'W', 23: 'X', 24: 'Y', 25: 'Z'
-}
-
-# Sample dictionary for autocorrection
-dictionary = ["ABHINAV", "JULIA", "ELISE", "DANIEL", "KAREN", "TOM", "NORA", "ALEX", "JOHN", "EMMA"]
-
-# === Home route
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    return "✅ Voxscribe TFLite API running! POST an image to /predict"
+    return "Handwriting Recognition API is running! 📜"
 
-# === Prediction route
 @app.route("/predict", methods=["POST"])
 def predict():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file uploaded'}), 400
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded."}), 400
 
-    file = request.files['image']
-    filename = secure_filename(file.filename)
-    img_array = np.frombuffer(file.read(), np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
+    file = request.files['file']
 
-    if img is None:
-        return jsonify({'error': 'Invalid image format'}), 400
+    try:
+        raw_prediction = predict_image(file, model)
+        corrected_prediction = autocorrect_text(raw_prediction)
 
-    # === Preprocess image
-    img_resized = cv2.resize(img, (28, 28))
-    _, img_thresh = cv2.threshold(img_resized, 100, 255, cv2.THRESH_BINARY_INV)
-    input_image = img_thresh.astype(np.float32) / 255.0
-    input_image = np.expand_dims(input_image, axis=(0, -1))  # (1, 28, 28, 1)
+        return jsonify({
+            "raw_prediction": raw_prediction,
+            "corrected_prediction": corrected_prediction
+        })
 
-    # === Set input and run inference
-    interpreter.set_tensor(input_details[0]['index'], input_image)
-    interpreter.invoke()
-    output_data = interpreter.get_tensor(output_details[0]['index'])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    predicted_index = np.argmax(output_data)
-    predicted_letter = words[predicted_index]
-
-    # === Autocorrect if needed (you can modify logic later)
-    raw_word = predicted_letter
-    closest = get_close_matches(raw_word, dictionary, n=1)
-    auto = closest[0] if closest else None
-
-    return jsonify({
-        "prediction": predicted_letter,
-        "autocorrected": auto
-    })
-
-# === Run app (for local testing only — Render uses gunicorn)
+# ----------------------------
+# Start Server
+# ----------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
