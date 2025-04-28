@@ -1,14 +1,24 @@
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-from tensorflow.keras.models import load_model
+import tensorflow as tf
 from flask import Flask, request, jsonify
 from textblob import TextBlob
-import os
 
-# ----------------------------
-# Preprocessing (your good version)
-# ----------------------------
+# -----------------------------------
+# Setup
+# -----------------------------------
+app = Flask(__name__)
+
+# Load TFLite model
+interpreter = tf.lite.Interpreter(model_path="emnistCNN.tflite")
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# -----------------------------------
+# Preprocessing (same as before)
+# -----------------------------------
 def preprocess_for_model(cropped_img):
     target_dim = 28
     edge_size = 2
@@ -29,25 +39,27 @@ def preprocess_for_model(cropped_img):
 
     final = 1.0 - (final.astype('float32') / 255.0)
     final = np.expand_dims(final, axis=(0, -1))  # (1,28,28,1)
-
     return final
 
-# ----------------------------
+# -----------------------------------
 # Segment letters
-# ----------------------------
+# -----------------------------------
 def segment_letters(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     boxes = []
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
-        if w * h > 100:  # Filter small noise
+        if w * h > 100:
             boxes.append((x, y, w, h))
+
     return boxes
 
+# -----------------------------------
+# Sort letters properly
+# -----------------------------------
 def sort_boxes(boxes):
     if len(boxes) == 0:
         return []
@@ -63,6 +75,7 @@ def sort_boxes(boxes):
         else:
             lines.append(current_line)
             current_line = [box]
+
     lines.append(current_line)
 
     for line in lines:
@@ -71,14 +84,11 @@ def sort_boxes(boxes):
     sorted_boxes = [box for line in lines for box in line]
     return sorted_boxes
 
-# ----------------------------
-# Predict and AutoCorrect
-# ----------------------------
-def predict_image(image, model):
+# -----------------------------------
+# Prediction
+# -----------------------------------
+def predict_image(img):
     characters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-    img = cv2.imdecode(np.frombuffer(image.read(), np.uint8), cv2.IMREAD_COLOR)
-    original = img.copy()
 
     boxes = segment_letters(img)
     boxes = sort_boxes(boxes)
@@ -87,13 +97,16 @@ def predict_image(image, model):
     prev_box = None
     current_line_y = None
 
-    for i, (x, y, w, h) in enumerate(boxes):
+    for (x, y, w, h) in boxes:
         cropped = img[y:y+h, x:x+w]
         cropped_gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-
         input_tensor = preprocess_for_model(cropped_gray)
-        prediction = model.predict(input_tensor, verbose=0)
-        idx = np.argmax(prediction)
+
+        interpreter.set_tensor(input_details[0]['index'], input_tensor)
+        interpreter.invoke()
+        output = interpreter.get_tensor(output_details[0]['index'])
+
+        idx = np.argmax(output)
         char = characters[idx]
 
         if prev_box is not None:
@@ -109,50 +122,33 @@ def predict_image(image, model):
         prev_box = (x, y, w, h)
         current_line_y = y
 
-    return predicted_text
+    # Auto-correct words using TextBlob
+    corrected = str(TextBlob(predicted_text).correct())
 
-def autocorrect_text(text):
-    corrected_lines = []
-    for line in text.split("\n"):
-        blob = TextBlob(line)
-        corrected = str(blob.correct())
-        corrected_lines.append(corrected)
-    return "\n".join(corrected_lines)
+    return corrected
 
-# ----------------------------
-# Flask App
-# ----------------------------
-app = Flask(__name__)
-
-model = load_model("emnistCNN.tflite", compile=False)
-print("✅ Model loaded successfully.")
-
+# -----------------------------------
+# Routes
+# -----------------------------------
 @app.route("/", methods=["GET"])
 def home():
-    return "Handwriting Recognition API is running! 📜"
+    return "Handwriting Recognition API is running!"
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded."}), 400
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
 
-    file = request.files['file']
+    file = request.files["image"]
+    npimg = np.frombuffer(file.read(), np.uint8)
+    img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-    try:
-        raw_prediction = predict_image(file, model)
-        corrected_prediction = autocorrect_text(raw_prediction)
+    result = predict_image(img)
 
-        return jsonify({
-            "raw_prediction": raw_prediction,
-            "corrected_prediction": corrected_prediction
-        })
+    return jsonify({"prediction": result})
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ----------------------------
-# Start Server
-# ----------------------------
+# -----------------------------------
+# Run
+# -----------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
