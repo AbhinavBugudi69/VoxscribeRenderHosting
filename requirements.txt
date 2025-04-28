@@ -3,3 +3,4 @@ tensorflow
 textblob
 nltk
 opencv-python
+gunicorn
