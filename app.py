@@ -124,7 +124,7 @@ def autocorrect_text(text):
 # ----------------------------
 app = Flask(__name__)
 
-model = load_model("emnistCNN.h5", compile=False)
+model = load_model("emnistCNN.tflite", compile=False)
 print("✅ Model loaded successfully.")
 
 @app.route("/", methods=["GET"])
