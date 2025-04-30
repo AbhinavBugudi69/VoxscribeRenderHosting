@@ -3,39 +3,78 @@ import numpy as np
 import tensorflow as tf
 from flask import Flask, request, jsonify
 
-# Initialize Flask app
+# ----------------------
+# Setup
+# ----------------------
 app = Flask(__name__)
-
-# Load your EMNIST-based TFLite model
 interpreter = tf.lite.Interpreter(model_path="emnistCNN.tflite")
 interpreter.allocate_tensors()
-
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Map index to character
-CHARACTER_MAP = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+# ----------------------
+# Characters Set
+# ----------------------
+characters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-# Match the JavaScript frontend's preprocessing
-def preprocess_for_model(image):
-    if len(image.shape) == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+# ----------------------
+# Preprocess (mimics JS)
+# ----------------------
+def preprocess_js_style(image):
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    resized = cv2.resize(image, (28, 28), interpolation=cv2.INTER_AREA)
-    inverted = cv2.bitwise_not(resized)
-    normalized = inverted.astype(np.float32) / 255.0
-    return normalized.reshape(1, 28, 28, 1)
+    # Find bounding box of the digit/letter
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
 
+    x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    roi = gray[y:y+h, x:x+w]
+
+    target_dim = 28
+    edge_size = 2
+    resize_dim = target_dim - edge_size * 2
+
+    # Padding to make it square
+    h, w = roi.shape
+    pad_vertically = w > h
+    pad_size = (max(h, w) - min(h, w)) // 2
+
+    if pad_vertically:
+        padded = np.pad(roi, ((pad_size, pad_size), (0, 0)), constant_values=255)
+    else:
+        padded = np.pad(roi, ((0, 0), (pad_size, pad_size)), constant_values=255)
+
+    # Resize to 24x24 then pad with 2px white to get 28x28
+    resized = cv2.resize(padded, (resize_dim, resize_dim))
+    final = np.pad(resized, ((edge_size, edge_size), (edge_size, edge_size)), constant_values=255)
+
+    # Normalize and invert like in JS
+    normalized = 1.0 - (final.astype(np.float32) / 255.0)
+    return np.expand_dims(normalized, axis=(0, -1))  # shape: (1,28,28,1)
+
+# ----------------------
+# Prediction
+# ----------------------
 def predict_image(img):
-    input_tensor = preprocess_for_model(img)
+    input_tensor = preprocess_js_style(img)
+    if input_tensor is None:
+        return "?"
+
     interpreter.set_tensor(input_details[0]['index'], input_tensor)
     interpreter.invoke()
     output = interpreter.get_tensor(output_details[0]['index'])
-    return CHARACTER_MAP[np.argmax(output)]
+    idx = np.argmax(output)
+    return characters[idx]
 
-@app.route("/", methods=["GET"])
+# ----------------------
+# API Endpoints
+# ----------------------
+@app.route("/")
 def home():
-    return "✅ Handwriting Recognition API (Single Character) is running!"
+    return "✅ VoxScribe Character Recognition API running."
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -46,8 +85,11 @@ def predict():
     npimg = np.frombuffer(file.read(), np.uint8)
     img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-    prediction = predict_image(img)
-    return jsonify({"prediction": prediction})
+    result = predict_image(img)
+    return jsonify({"prediction": result})
 
+# ----------------------
+# Run Server
+# ----------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
