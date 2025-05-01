@@ -1,9 +1,3 @@
-# Student ID : W1947458
-# Student Name : Abhinava Sai Bugudi
-# Supervisor : Dr. Dimitris Dracopoulos
-# Module : 6COSC023W.Y Computer Science Final Project
-
-
 import cv2
 import numpy as np
 import tensorflow as tf
@@ -11,66 +5,60 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Loading a model
 model = tf.lite.Interpreter(model_path="voxscribe_emnist_model.tflite")
 model.allocate_tensors()
+inp = model.get_input_details()
+out = model.get_output_details()
 
-# Preparing a model
-input_info = model.get_input_details()
-output_info = model.get_output_details()
-
-# Preparing the input image
-def prep_image(gray):
-    size = 28
-    pad = 2
-    resize_to = size - pad * 2
-
+def prep(gray):
+    sz, p = 28, 2
+    rsz = sz - p * 2
     h, w = gray.shape
-    vertical = w > h
-    gap = (max(h, w) - min(h, w)) // 2
+    pad = ((max(h, w) - min(h, w)) // 2,)
+    pad = ((pad[0], pad[0]), (0, 0)) if w > h else ((0, 0), (pad[0], pad[0]))
+    padded = np.pad(gray, pad, constant_values=255)
+    img = cv2.resize(padded, (rsz, rsz))
+    img = np.pad(img, ((p, p), (p, p)), constant_values=255)
+    img = 1.0 - (img.astype("float32") / 255.0)
+    return np.expand_dims(img, axis=(0, -1))
 
-    if vertical:
-        padded = np.pad(gray, ((gap, gap), (0, 0)), constant_values=255)
-    else:
-        padded = np.pad(gray, ((0, 0), (gap, gap)), constant_values=255)
+def segment(img):
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, t = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    c, _ = cv2.findContours(t, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = [cv2.boundingRect(i) for i in c if cv2.contourArea(i) > 50]
+    boxes = sorted(boxes, key=lambda b: b[0])
+    return boxes
 
-    resized = cv2.resize(padded, (resize_to, resize_to))
-    final = np.pad(resized, ((pad, pad), (pad, pad)), constant_values=255)
-
-    final = 1.0 - (final.astype('float32') / 255.0)
-    return np.expand_dims(final, axis=(0, -1))
-
-# Processing the prediction
-def guess_char(img):
+def predict(img):
     chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    tensor = prep_image(gray)
+    bits = segment(img)
+    res = ""
+    for x, y, w, h in bits:
+        crop = img[y:y+h, x:x+w]
+        g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        t = prep(g)
+        model.set_tensor(inp[0]['index'], t)
+        model.invoke()
+        r = model.get_tensor(out[0]['index'])
+        res += chars[np.argmax(r)]
+    return res
 
-    model.set_tensor(input_info[0]['index'], tensor)
-    model.invoke()
-    out = model.get_tensor(output_info[0]['index'])
-
-    return chars[int(np.argmax(out))]
-
-# Hosting the API
 @app.route("/", methods=["GET"])
-def status():
-    return "VoxScribe API is live"
+def ping():
+    return "VoxScribe sentence recognizer live"
 
-# Sending out the prediction
 @app.route("/predict", methods=["POST"])
-def handle_prediction():
+def go():
     if "image" not in request.files:
-        return jsonify({"error": "No image found. Try again"}), 400
-
-    raw = request.files["image"].read()
-    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-
+        return jsonify({"error": "Image missing"}), 400
     try:
-        answer = guess_char(img)
-        return jsonify({"prediction": answer})
-    except Exception as err:
-        return jsonify({"error": str(err)}), 500
+        raw = np.frombuffer(request.files["image"].read(), np.uint8)
+        img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        text = predict(img)
+        return jsonify({"prediction": text})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
