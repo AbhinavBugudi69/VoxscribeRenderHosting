@@ -21,18 +21,24 @@ output_info = model.get_output_details()
 
 # Preparing the input image
 def prep_image(gray):
-    # Resize to 28x28 first
-    resized = cv2.resize(gray, (28, 28), interpolation=cv2.INTER_AREA)
+    size = 28
+    pad = 2
+    resize_to = size - pad * 2
 
-    # Invert: EMNIST has white text (0) on black bg (255)
-    inverted = cv2.bitwise_not(resized)
+    h, w = gray.shape
+    vertical = w > h
+    gap = (max(h, w) - min(h, w)) // 2
 
-    # Normalize: Scale to [0,1]
-    normalized = inverted.astype('float32') / 255.0
+    if vertical:
+        padded = np.pad(gray, ((gap, gap), (0, 0)), constant_values=255)
+    else:
+        padded = np.pad(gray, ((0, 0), (gap, gap)), constant_values=255)
 
-    # Reshape to model input shape [1, 28, 28, 1]
-    return np.expand_dims(normalized, axis=(0, -1))
+    resized = cv2.resize(padded, (resize_to, resize_to))
+    final = np.pad(resized, ((pad, pad), (pad, pad)), constant_values=255)
 
+    final = 1.0 - (final.astype('float32') / 255.0)
+    return np.expand_dims(final, axis=(0, -1))
 
 # Processing the prediction
 def guess_char(img):
