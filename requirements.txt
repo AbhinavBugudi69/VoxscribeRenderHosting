@@ -1,6 +1,5 @@
 flask
-tensorflow
+numpy
 opencv-python
-textblob
-gunicorn
-pillow
+tensorflow
+Pillow
