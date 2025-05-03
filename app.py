@@ -57,13 +57,15 @@ def preprocess_js_style(image):
 def predict_image(img):
     input_tensor = preprocess_js_style(img)
     if input_tensor is None:
-        return "?"
+        return [("?", 0.0)]
 
     interpreter.set_tensor(input_details[0]['index'], input_tensor)
     interpreter.invoke()
-    output = interpreter.get_tensor(output_details[0]['index'])
-    idx = np.argmax(output)
-    return characters[idx]
+    output = interpreter.get_tensor(output_details[0]['index'])[0]
+
+    top_indices = output.argsort()[-3:][::-1]  # Top 3
+    results = [(characters[i], float(output[i]) * 100) for i in top_indices]
+    return results
 
 # Handling the API requests and posts
 @app.route("/")
@@ -79,8 +81,18 @@ def predict():
     npimg = np.frombuffer(file.read(), np.uint8)
     img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-    result = predict_image(img)
-    return jsonify({"prediction": result})
+    predictions = predict_image(img)
+    top_char, top_confidence = predictions[0]
+
+    return jsonify({
+        "prediction": top_char,
+        "confidence": round(top_confidence, 2),
+        "alternatives": [
+            {"char": c, "confidence": round(conf, 2)}
+            for c, conf in predictions
+        ]
+    })
+
 
 # Running the server
 if __name__ == "__main__":
