@@ -8,21 +8,20 @@ import numpy as np
 import tensorflow as tf
 from flask import Flask, request, jsonify
 
-
 app = Flask(__name__)
 
-# Loading a model
+# Load the TFLite model
 interpreter = tf.lite.Interpreter(model_path="voxscribe_emnist_model.tflite")
 interpreter.allocate_tensors()
 
-# Preparing a model
+# Get input/output details
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Recognisable characters
+# Character map (EMNIST - 62 classes: 0-9, A-Z, a-z)
 characters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-# Preparing the input image
+# Preprocessing function
 def preprocess_js_style(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
@@ -51,9 +50,9 @@ def preprocess_js_style(image):
     final = np.pad(resized, ((edge_size, edge_size), (edge_size, edge_size)), constant_values=255)
 
     normalized = 1.0 - (final.astype(np.float32) / 255.0)
-    return np.expand_dims(normalized, axis=(0, -1)) 
+    return np.expand_dims(normalized, axis=(0, -1))
 
-# Processing the prediction
+# Prediction logic
 def predict_image(img):
     input_tensor = preprocess_js_style(img)
     if input_tensor is None:
@@ -63,15 +62,16 @@ def predict_image(img):
     interpreter.invoke()
     output = interpreter.get_tensor(output_details[0]['index'])[0]
 
-    top_indices = output.argsort()[-3:][::-1]  # Top 3
+    top_indices = output.argsort()[-3:][::-1]  # Top 3 predictions
     results = [(characters[i], float(output[i]) * 100) for i in top_indices]
     return results
 
-# Handling the API requests and posts
+# Default route
 @app.route("/")
 def home():
     return "✅ VoxScribe Character Recognition API running."
 
+# Prediction endpoint
 @app.route("/predict", methods=["POST"])
 def predict():
     if "image" not in request.files:
@@ -93,7 +93,6 @@ def predict():
         ]
     })
 
-
-# Running the server
+# Run the server
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
