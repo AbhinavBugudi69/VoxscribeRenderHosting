@@ -3,6 +3,7 @@
 # Supervisor : Dr. Dimitris Dracopoulos
 # Module : 6COSC023W.Y Computer Science Final Project
 
+
 import cv2
 import numpy as np
 import tensorflow as tf
@@ -10,14 +11,15 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Load the TFLite model
+# Loading a model
 model = tf.lite.Interpreter(model_path="voxscribe_emnist_model.tflite")
 model.allocate_tensors()
 
+# Preparing a model
 input_info = model.get_input_details()
 output_info = model.get_output_details()
 
-# Preprocess image for EMNIST model
+# Preparing the input image
 def prep_image(gray):
     size = 28
     pad = 2
@@ -38,7 +40,7 @@ def prep_image(gray):
     final = 1.0 - (final.astype('float32') / 255.0)
     return np.expand_dims(final, axis=(0, -1))
 
-# Predict character from image
+# Processign the prediction
 def guess_char(img):
     chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -50,16 +52,16 @@ def guess_char(img):
 
     return chars[int(np.argmax(out))]
 
-# Status check route
+# Hosting the API
 @app.route("/", methods=["GET"])
 def status():
-    return "VoxScribe Character Recognition API is live"
+    return "VoxScribe API is live"
 
-# Prediction route
+# Sending out the prediction
 @app.route("/predict", methods=["POST"])
 def handle_prediction():
     if "image" not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
+        return jsonify({"error": "No image found. Try again"}), 400
 
     raw = request.files["image"].read()
     img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
