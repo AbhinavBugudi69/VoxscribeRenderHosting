@@ -1,31 +1,32 @@
+# Student ID : W1947458
+# Student Name : Abhinava Sai Bugudi
+# Supervisor : Dr. Dimitris Dracopoulos
+# Module : 6COSC023W.Y Computer Science Final Project
+
 import cv2
 import numpy as np
 import tensorflow as tf
 from flask import Flask, request, jsonify
 
-# ----------------------
-# Setup
-# ----------------------
+
 app = Flask(__name__)
+
+# Loading a model
 interpreter = tf.lite.Interpreter(model_path="voxscribe_emnist_model.tflite")
 interpreter.allocate_tensors()
+
+# Preparing a model
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# ----------------------
-# Characters Set
-# ----------------------
+# Recognisable characters
 characters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-# ----------------------
-# Preprocess (mimics JS)
-# ----------------------
+# Preparing the input image
 def preprocess_js_style(image):
-    # Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Find bounding box of the digit/letter
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
@@ -37,7 +38,6 @@ def preprocess_js_style(image):
     edge_size = 2
     resize_dim = target_dim - edge_size * 2
 
-    # Padding to make it square
     h, w = roi.shape
     pad_vertically = w > h
     pad_size = (max(h, w) - min(h, w)) // 2
@@ -47,17 +47,13 @@ def preprocess_js_style(image):
     else:
         padded = np.pad(roi, ((0, 0), (pad_size, pad_size)), constant_values=255)
 
-    # Resize to 24x24 then pad with 2px white to get 28x28
     resized = cv2.resize(padded, (resize_dim, resize_dim))
     final = np.pad(resized, ((edge_size, edge_size), (edge_size, edge_size)), constant_values=255)
 
-    # Normalize and invert like in JS
     normalized = 1.0 - (final.astype(np.float32) / 255.0)
-    return np.expand_dims(normalized, axis=(0, -1))  # shape: (1,28,28,1)
+    return np.expand_dims(normalized, axis=(0, -1)) 
 
-# ----------------------
-# Prediction
-# ----------------------
+# Processing the prediction
 def predict_image(img):
     input_tensor = preprocess_js_style(img)
     if input_tensor is None:
@@ -69,9 +65,7 @@ def predict_image(img):
     idx = np.argmax(output)
     return characters[idx]
 
-# ----------------------
-# API Endpoints
-# ----------------------
+# Handling the API requests and posts
 @app.route("/")
 def home():
     return "✅ VoxScribe Character Recognition API running."
@@ -88,8 +82,6 @@ def predict():
     result = predict_image(img)
     return jsonify({"prediction": result})
 
-# ----------------------
-# Run Server
-# ----------------------
+# Running the server
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
